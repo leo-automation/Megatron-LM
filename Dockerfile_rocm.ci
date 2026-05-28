@@ -110,7 +110,7 @@ RUN git clone https://github.com/NVIDIA-NeMo/Emerging-Optimizers.git &&\
 RUN git clone https://github.com/NVIDIA/nvidia-resiliency-ext && \
     cd nvidia-resiliency-ext && \
     git checkout v0.6.0 && \
-    pip install .
+    STRAGGLER_DET_SKIP_CUPTI_EXT_BUILD=1 pip install .
 
 WORKDIR $WORKSPACE_DIR
 COPY . Megatron-LM
