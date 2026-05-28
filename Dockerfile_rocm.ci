@@ -42,9 +42,9 @@ wrapt \
 zarr \
 wandb \
 tensorstore==0.1.45 \
-pytest_mock \
+mock \
 pybind11 \
-setuptools==69.5.1 \
+'setuptools<82' \
 datasets \
 tiktoken \
 pynvml \
