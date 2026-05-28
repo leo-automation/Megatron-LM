@@ -202,6 +202,9 @@ def test_preprocess_data_gpt():
         do_test_preprocess_data(temp_dir, extra_args=gpt_args)
 
 
+@pytest.mark.failing_on_rocm(
+    reason="Hardcoded /opt/megatron-lm and /opt/data/datasets/dclm paths not present in ROCm CI image"
+)
 def test_preprocess_data_gpt_optimal_workers():
     with tempfile.TemporaryDirectory() as temp_dir:
 
