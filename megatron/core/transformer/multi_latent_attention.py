@@ -1262,10 +1262,20 @@ class FusedMLASelfAttention(MLASelfAttention):
         else:
             raise ValueError(f"Unsupported linear_qkv_down_proj: {submodules.linear_qkv_down_proj}")
 
+        kv_down_proj_core_size = self.config.kv_lora_rank + self.config.qk_pos_emb_head_dim
+        self.kv_down_proj_mxfp8_padding = 0
+        qkv_down_out = self.config.q_lora_rank + kv_down_proj_core_size
+        if self.config.fp8 and self.config.fp8_recipe == Fp8Recipe.mxfp8:
+            align = get_fp8_align_size(Fp8Recipe.mxfp8)
+            remainder = kv_down_proj_core_size % align
+            if remainder != 0:
+                self.kv_down_proj_mxfp8_padding = align - remainder
+                qkv_down_out += self.kv_down_proj_mxfp8_padding
+
         self.linear_qkv_down_proj = build_module(
             submodules.linear_qkv_down_proj,
             self.config.hidden_size,
-            self.config.q_lora_rank + self.config.kv_lora_rank + self.config.qk_pos_emb_head_dim,
+            qkv_down_out,
             config=self.config,
             init_method=self.config.init_method,
             bias=False,
@@ -1323,9 +1333,14 @@ class FusedMLASelfAttention(MLASelfAttention):
     def _qkv_down_projection(self, hidden_states):
         """Fused q/kv down projection path."""
         qkv, _ = self.linear_qkv_down_proj(hidden_states)
+        kv_dim = (
+            self.config.kv_lora_rank
+            + self.config.qk_pos_emb_head_dim
+            + self.kv_down_proj_mxfp8_padding
+        )
         q_compressed, kv_combined = torch.split(
             qkv,
-            [self.config.q_lora_rank, self.config.kv_lora_rank + self.config.qk_pos_emb_head_dim],
+            [self.config.q_lora_rank, kv_dim],
             dim=-1,
         )
         return q_compressed, kv_combined
@@ -1372,24 +1387,38 @@ class FusedMLASelfAttention(MLASelfAttention):
 
         fused_weight = self.linear_qkv_down_proj.weight
         total_out = (
-            self.config.q_lora_rank + self.config.kv_lora_rank + self.config.qk_pos_emb_head_dim
+            self.config.q_lora_rank
+            + self.config.kv_lora_rank
+            + self.config.qk_pos_emb_head_dim
+            + self.kv_down_proj_mxfp8_padding
         )
         tp_size = get_pg_size(self.tp_group)
 
         if fused_weight.size(0) == total_out:
             q_split = self.config.q_lora_rank
-            kv_split = self.config.kv_lora_rank + self.config.qk_pos_emb_head_dim
+            kv_split = (
+                self.config.kv_lora_rank
+                + self.config.qk_pos_emb_head_dim
+                + self.kv_down_proj_mxfp8_padding
+            )
         else:
             assert (
                 self.config.q_lora_rank % tp_size == 0
             ), "q_lora_rank must be divisible by tensor-parallel size"
             assert (
-                self.config.kv_lora_rank + self.config.qk_pos_emb_head_dim
+                self.config.kv_lora_rank
+                + self.config.qk_pos_emb_head_dim
+                + self.kv_down_proj_mxfp8_padding
             ) % tp_size == 0, (
-                "kv_lora_rank + qk_pos_emb_head_dim must be divisible by tensor-parallel size"
+                "kv_lora_rank + qk_pos_emb_head_dim (+ mxfp8 padding) must be divisible by "
+                "tensor-parallel size"
             )
             q_split = self.config.q_lora_rank // tp_size
-            kv_split = (self.config.kv_lora_rank + self.config.qk_pos_emb_head_dim) // tp_size
+            kv_split = (
+                self.config.kv_lora_rank
+                + self.config.qk_pos_emb_head_dim
+                + self.kv_down_proj_mxfp8_padding
+            ) // tp_size
 
         if q_split + kv_split != fused_weight.size(0):
             raise ValueError(
